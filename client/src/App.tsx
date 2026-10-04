@@ -292,7 +292,7 @@ function App() {
   const addSpotifyTrack = (result: typeof spotifyResults[number]) => {
     const track: Track = { id: `spotify-${result.id}`, title: result.name, artist: result.artists.map((artist) => artist.name).join(', '), album: result.album.name, duration: Math.floor(result.duration_ms / 1000), cover: result.album.images?.[0]?.url ?? art('photo-1519681393784-d120267933ba', 900), accent: '#878761', previewUrl: result.preview_url ?? undefined, spotifyUri: result.uri };
     addTrack(track); setModalOpen(false);
-    if (!result.preview_url) notify('Spotify no entregó preview para esta pista; añádela y usa un archivo local mientras conectamos Playback SDK.', true);
+    if (!result.preview_url) notify('Esta pista no tiene preview; intenta reproducirla con el botón de Spotify.', false);
   };
 
   const addLocalFiles = (files: FileList | null) => {

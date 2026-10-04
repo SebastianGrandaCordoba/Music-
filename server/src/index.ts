@@ -99,7 +99,7 @@ app.get('/api/spotify/search', async (req, res, next) => {
 
 app.put('/api/spotify/player/play', async (req, res, next) => {
   try {
-    const token = req.header('authorization')?.match(/^Bearer\\s+(.+)$/i)?.[1];
+    const token = req.header('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
     const deviceId = String(req.query.device_id || '');
     const uri = String(req.body?.uri || '');
     if (!token) return res.status(401).json({ error: 'Falta el token de acceso de Spotify.' });
