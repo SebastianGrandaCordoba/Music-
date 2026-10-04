@@ -89,3 +89,9 @@ pnpm build
 La conexión con Spotify usa OAuth PKCE y requiere que la aplicación tenga el scope `streaming` habilitado, una cuenta Premium elegible y acceso al Web Playback SDK. La disponibilidad depende de los permisos que Spotify conceda a la aplicación. Cuando no se pueda reproducir desde Spotify, Needle usa un preview disponible o permite cargar un archivo de audio local.
 
 La cola se guarda en el almacenamiento local del navegador. Los archivos de audio seleccionados se reproducen desde el dispositivo y no se cargan al servidor.
+
+### Spotify en modo de desarrollo
+
+Las aplicaciones de Spotify en **Development Mode** tienen acceso restringido. La cuenta propietaria de la aplicación debe tener Premium activo y cada usuario que quiera conectar Spotify debe estar autorizado en **Spotify for Developers → aplicación → Settings → Users Management**. Spotify limita cuántos usuarios se pueden autorizar en este modo; consulta el Dashboard para ver el límite vigente. Además, cada cuenta que use Web Playback SDK para escuchar música completa debe tener Premium.
+
+El profesor puede probar la cola, la lista doblemente enlazada y sus controles sin conectar Spotify. Para escuchar audio durante la demostración, puede cargar un archivo local desde **Añadir música → Subir audio local**. Los archivos permanecen en su dispositivo.
