@@ -67,7 +67,8 @@ function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved) as Track[];
-        parsed.forEach((track) => queueRef.current.addLast(track));
+        const demosById = new Map(seedTracks.map((track) => [track.id, track]));
+        parsed.forEach((track) => queueRef.current.addLast(demosById.get(track.id) ?? track));
         if (parsed.length) { sync(); return; }
       } catch { localStorage.removeItem('needle-queue-v1'); }
     }
@@ -228,9 +229,31 @@ function App() {
 
   const togglePlay = () => {
     if (!current && tracks.length) { queueRef.current.current = queueRef.current.head; sync(); }
-    if (!current && !tracks.length) return;
-    if (provider === 'spotify' && spotifyPlayer) { void spotifyPlayer.togglePlay().catch(() => undefined); return; }
-    setPlaying((value) => !value);
+    const track = current ?? queueRef.current.current?.value ?? null;
+    if (!track) return;
+    if (track.spotifyUri) {
+      if (!token) { notify('Conecta tu cuenta de Spotify para reproducir esta pista.', true); return; }
+      if (!spotifyPlayer || !spotifySdkReady || !spotifyDeviceId) { notify('El reproductor de Spotify todavía se está preparando. Espera unos segundos y vuelve a pulsar reproducir.', true); return; }
+      if (playing) {
+        void spotifyPlayer.pause().then(() => setPlaying(false)).catch((error: unknown) => notify(error instanceof Error ? error.message : 'No se pudo pausar Spotify.', true));
+        return;
+      }
+      void spotifyPlayer.activateElement()
+        .then(() => fetch(`${apiBase}/api/spotify/player/play?device_id=${encodeURIComponent(spotifyDeviceId)}`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ uri: track.spotifyUri }) }))
+        .then(async (response) => {
+          if (response.ok) { setProvider('spotify'); setPlaying(true); return; }
+          const data = await response.json().catch(() => ({})) as { error?: string };
+          throw new Error(data.error || `Spotify respondió ${response.status}.`);
+        })
+        .catch((error: unknown) => { setPlaying(false); notify(error instanceof Error ? error.message : 'No se pudo iniciar Spotify.', true); });
+      return;
+    }
+    const audio = audioRef.current;
+    if (!track.previewUrl || !audio) { setPlaying(false); notify('Esta pista no tiene audio. Elige una demo o carga un archivo local.', true); return; }
+    if (playing) { audio.pause(); setPlaying(false); return; }
+    if (audio.getAttribute('src') !== track.previewUrl) { audio.src = track.previewUrl; audio.load(); }
+    void audio.play().then(() => { setProvider('preview'); setPlaying(true); })
+      .catch(() => { setPlaying(false); notify('El navegador no pudo iniciar este audio. Vuelve a pulsar reproducir.', true); });
   };
 
   useEffect(() => {
