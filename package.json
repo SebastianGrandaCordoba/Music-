@@ -1,0 +1,15 @@
+{
+  "name": "needle-music-player",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": ["client", "server"],
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"pnpm --filter @needle/server dev\" \"pnpm --filter @needle/client dev\"",
+    "dev:client": "pnpm --filter @needle/client dev",
+    "dev:server": "pnpm --filter @needle/server dev",
+    "build": "pnpm --filter @needle/client build && pnpm --filter @needle/server build",
+    "start": "pnpm --filter @needle/server start"
+  },
+  "devDependencies": { "concurrently": "^9.1.2", "typescript": "^5.8.3" }
+}
