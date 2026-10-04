@@ -86,7 +86,14 @@ app.get('/api/spotify/search', async (req, res, next) => {
     const url = new URL('https://api.spotify.com/v1/search');
     url.search = new URLSearchParams({ q: query, type: 'track', limit: '8' }).toString();
     const response = await fetch(url, { headers: { Authorization: `Bearer ${match[1]}` } });
-    res.status(response.status).json(await response.json());
+    const payload = await readSpotifyResponse(response);
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: spotifyErrorMessage(payload, response.status),
+        spotifyStatus: response.status,
+      });
+    }
+    res.json(payload);
   } catch (error) { next(error); }
 });
 
@@ -120,6 +127,27 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 app.listen(port, '0.0.0.0', () => console.info(`Needle API listening on port ${port}`));
+
+/** Spotify normally responds with JSON, but some gateway/policy errors are plain text. */
+async function readSpotifyResponse(response: globalThis.Response): Promise<unknown> {
+  const body = await response.text();
+  if (!body) return {};
+  try { return JSON.parse(body) as unknown; }
+  catch { return { error: body.slice(0, 500) }; }
+}
+
+function spotifyErrorMessage(payload: unknown, status: number): string {
+  const value = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  const nested = value.error && typeof value.error === 'object' ? value.error as Record<string, unknown> : {};
+  const message = [value.error_description, nested.message, typeof value.error === 'string' ? value.error : undefined]
+    .find((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim()));
+  if (status === 401) return 'La sesión de Spotify expiró. Desconecta y vuelve a conectar tu cuenta.';
+  if (status === 403) return message
+    ? `Spotify rechazó la búsqueda (403): ${message}`
+    : 'Spotify rechazó la búsqueda (403). Revisa que la cuenta conectada tenga acceso y que la aplicación permita este usuario.';
+  if (status === 429) return 'Spotify limitó temporalmente las búsquedas. Espera un momento e inténtalo de nuevo.';
+  return message ? `Spotify no pudo buscar (${status}): ${message}` : `Spotify no pudo completar la búsqueda (HTTP ${status}).`;
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);

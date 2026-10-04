@@ -273,7 +273,15 @@ function App() {
     setSearchingSpotify(true);
     try {
       const response = await fetch(`${apiBase}/api/spotify/search?q=${encodeURIComponent(spotifySearch.trim())}`, { headers: { Authorization: `Bearer ${token}` } });
-      const data = await response.json() as { tracks?: { items?: typeof spotifyResults }; error?: string };
+      const body = await response.text();
+      let data: { tracks?: { items?: typeof spotifyResults }; error?: string; spotifyStatus?: number };
+      try { data = JSON.parse(body) as typeof data; }
+      catch {
+        const detail = body.trim().slice(0, 240);
+        throw new Error(detail
+          ? `El servidor devolvió una respuesta inesperada${response.status ? ` (HTTP ${response.status})` : ''}: ${detail}`
+          : `El servidor devolvió una respuesta vacía (HTTP ${response.status}).`);
+      }
       if (!response.ok) throw new Error(data.error || 'Spotify no pudo completar la búsqueda.');
       setSpotifyResults(data.tracks?.items ?? []);
       if (!data.tracks?.items?.length) notify('No se encontraron pistas para esa búsqueda.');
