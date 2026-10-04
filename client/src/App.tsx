@@ -9,6 +9,7 @@ type SpotifySdkPlayer = {
   addListener: (event: string, callback: (payload: { device_id?: string; message?: string } | SpotifyPlaybackState) => void) => boolean;
   connect: () => Promise<boolean>; disconnect: () => void; pause: () => Promise<void>; resume: () => Promise<void>;
   activateElement: () => Promise<void>; togglePlay: () => Promise<void>; setVolume: (volume: number) => Promise<void>; seek: (position: number) => Promise<void>;
+  getCurrentState: () => Promise<SpotifyPlaybackState | null>;
 };
 declare global { interface Window { Spotify?: { Player: new (options: { name: string; getOAuthToken: (callback: (token: string) => void) => void; volume: number }) => SpotifySdkPlayer }; onSpotifyWebPlaybackSDKReady?: () => void } }
 
@@ -67,8 +68,7 @@ function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved) as Track[];
-        const demosById = new Map(seedTracks.map((track) => [track.id, track]));
-        parsed.forEach((track) => queueRef.current.addLast(demosById.get(track.id) ?? track));
+        parsed.forEach((track) => queueRef.current.addLast(track));
         if (parsed.length) { sync(); return; }
       } catch { localStorage.removeItem('needle-queue-v1'); }
     }
@@ -169,7 +169,6 @@ function App() {
     const audio = audioRef.current;
     if (provider === 'spotify' && spotifyPlayer) {
       spotifyPlayer.setVolume(muted ? 0 : volume).catch(() => undefined);
-      if (playing) void spotifyPlayer.resume().catch(() => undefined); else void spotifyPlayer.pause().catch(() => undefined);
       return;
     }
     if (!audio || provider !== 'preview') return;
@@ -178,6 +177,24 @@ function App() {
     if (playing) void audio.play().catch(() => setPlaying(false));
     else audio.pause();
   }, [playing, volume, muted, provider, current?.id, spotifyPlayer]);
+
+  // The SDK's state event is not a reliable playback clock; poll its current
+  // position while playing so the progress bar advances every half second.
+  useEffect(() => {
+    if (provider !== 'spotify' || !spotifyPlayer || !playing) return;
+    let active = true;
+    const refreshPosition = async () => {
+      try {
+        const state = await spotifyPlayer.getCurrentState();
+        if (!active || !state) return;
+        setPosition(state.position / 1000);
+        setDuration(state.duration / 1000);
+      } catch { /* Playback state can briefly be unavailable during track changes. */ }
+    };
+    void refreshPosition();
+    const timer = window.setInterval(() => { void refreshPosition(); }, 500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [provider, spotifyPlayer, playing, current?.id]);
 
   const move = useCallback((direction: 'next' | 'previous', automatic = false) => {
     const list = queueRef.current;
@@ -229,31 +246,13 @@ function App() {
 
   const togglePlay = () => {
     if (!current && tracks.length) { queueRef.current.current = queueRef.current.head; sync(); }
-    const track = current ?? queueRef.current.current?.value ?? null;
-    if (!track) return;
-    if (track.spotifyUri) {
-      if (!token) { notify('Conecta tu cuenta de Spotify para reproducir esta pista.', true); return; }
-      if (!spotifyPlayer || !spotifySdkReady || !spotifyDeviceId) { notify('El reproductor de Spotify todavía se está preparando. Espera unos segundos y vuelve a pulsar reproducir.', true); return; }
-      if (playing) {
-        void spotifyPlayer.pause().then(() => setPlaying(false)).catch((error: unknown) => notify(error instanceof Error ? error.message : 'No se pudo pausar Spotify.', true));
-        return;
-      }
-      void spotifyPlayer.activateElement()
-        .then(() => fetch(`${apiBase}/api/spotify/player/play?device_id=${encodeURIComponent(spotifyDeviceId)}`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ uri: track.spotifyUri }) }))
-        .then(async (response) => {
-          if (response.ok) { setProvider('spotify'); setPlaying(true); return; }
-          const data = await response.json().catch(() => ({})) as { error?: string };
-          throw new Error(data.error || `Spotify respondió ${response.status}.`);
-        })
-        .catch((error: unknown) => { setPlaying(false); notify(error instanceof Error ? error.message : 'No se pudo iniciar Spotify.', true); });
+    if (!current && !tracks.length) return;
+    if (provider === 'spotify' && spotifyPlayer) {
+      if (playing) void spotifyPlayer.pause().then(() => setPlaying(false)).catch(() => undefined);
+      else void spotifyPlayer.resume().then(() => setPlaying(true)).catch(() => undefined);
       return;
     }
-    const audio = audioRef.current;
-    if (!track.previewUrl || !audio) { setPlaying(false); notify('Esta pista no tiene audio. Elige una demo o carga un archivo local.', true); return; }
-    if (playing) { audio.pause(); setPlaying(false); return; }
-    if (audio.getAttribute('src') !== track.previewUrl) { audio.src = track.previewUrl; audio.load(); }
-    void audio.play().then(() => { setProvider('preview'); setPlaying(true); })
-      .catch(() => { setPlaying(false); notify('El navegador no pudo iniciar este audio. Vuelve a pulsar reproducir.', true); });
+    setPlaying((value) => !value);
   };
 
   useEffect(() => {
@@ -315,7 +314,7 @@ function App() {
   const addSpotifyTrack = (result: typeof spotifyResults[number]) => {
     const track: Track = { id: `spotify-${result.id}`, title: result.name, artist: result.artists.map((artist) => artist.name).join(', '), album: result.album.name, duration: Math.floor(result.duration_ms / 1000), cover: result.album.images?.[0]?.url ?? art('photo-1519681393784-d120267933ba', 900), accent: '#878761', previewUrl: result.preview_url ?? undefined, spotifyUri: result.uri };
     addTrack(track); setModalOpen(false);
-    if (!result.preview_url) notify('Esta pista no tiene preview; intenta reproducirla con el botón de Spotify.', false);
+    if (!result.preview_url) notify('Spotify no entregó preview para esta pista; añádela y usa un archivo local mientras conectamos Playback SDK.', true);
   };
 
   const addLocalFiles = (files: FileList | null) => {
