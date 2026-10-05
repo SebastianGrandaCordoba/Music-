@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowRight, ArrowUp, AudioLines, Disc3, ExternalLink, Heart, ListMusic, LoaderCircle, MoreHorizontal, Music2, Pause, Play, Plus, Repeat2, Search, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Sparkles, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowRight, ArrowUp, AudioLines, Clock3, Disc3, ExternalLink, Heart, ListMusic, LoaderCircle, MoreHorizontal, Music2, Pause, Play, Plus, Repeat2, Search, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Sparkles, Trash2, X } from 'lucide-react';
 import { DoublyLinkedList } from './structures/DoublyLinkedList';
 import { makeTrack, seedTracks } from './data/tracks';
 import type { Track } from './types';
@@ -16,6 +16,12 @@ declare global { interface Window { Spotify?: { Player: new (options: { name: st
 const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 const art = (id: string, size = 120) => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=${size}&q=80`;
 const fmt = (value: number) => `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
+type HistoryEntry = { id: string; track: Track; outcome: 'finished' | 'skipped'; timestamp: number };
+const shuffledTrackIds = (tracks: Track[], excludedId?: string) => {
+  const ids = tracks.filter((track) => track.id !== excludedId).map((track) => track.id);
+  for (let index = ids.length - 1; index > 0; index -= 1) { const target = Math.floor(Math.random() * (index + 1)); [ids[index], ids[target]] = [ids[target], ids[index]]; }
+  return ids;
+};
 
 function Cover({ track, className = '' }: { track: Track; className?: string }) {
   return <img className={`cover ${className}`} src={track.cover} alt={`Portada de ${track.album}`} />;
@@ -23,9 +29,18 @@ function Cover({ track, className = '' }: { track: Track; className?: string }) 
 
 function App() {
   const queueRef = useRef(new DoublyLinkedList<Track>());
+  const catalogRef = useRef<Track[]>([]);
+  const shuffleBagRef = useRef<string[]>([]);
+  const spotifyEndedTrackRef = useRef<string | null>(null);
+  const spotifyEndedHandlerRef = useRef<() => void>(() => undefined);
+  const initializedRef = useRef(false);
+  const historyRef = useRef<HistoryEntry[]>([]);
   const audioRef = useRef<HTMLAudioElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [history, setHistory] = useState<HistoryEntry[]>(() => {
+    try { return JSON.parse(localStorage.getItem('needle-history-v1') || '[]') as HistoryEntry[]; } catch { return []; }
+  });
   const [current, setCurrent] = useState<Track | null>(null);
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
@@ -63,23 +78,48 @@ function App() {
     setCurrent(list.current?.value ?? null);
   }, []);
 
+  const recordHistory = useCallback((track: Track, outcome: HistoryEntry['outcome']) => {
+    const entry: HistoryEntry = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, track, outcome, timestamp: Date.now() };
+    historyRef.current = [entry, ...historyRef.current];
+    setHistory(historyRef.current);
+  }, []);
+
   useEffect(() => {
+    if (initializedRef.current) return;
+    initializedRef.current = true;
+    const savedCatalog = localStorage.getItem('needle-catalog-v1');
+    if (savedCatalog) {
+      try { catalogRef.current = JSON.parse(savedCatalog) as Track[]; } catch { localStorage.removeItem('needle-catalog-v1'); }
+    }
     const saved = localStorage.getItem('needle-queue-v1');
     if (saved) {
       try {
         const parsed = JSON.parse(saved) as Track[];
         parsed.forEach((track) => queueRef.current.addLast(track));
-        if (parsed.length) { sync(); return; }
+        if (parsed.length) {
+          const catalogIds = new Set(catalogRef.current.map((track) => track.id));
+          catalogRef.current = [...catalogRef.current, ...parsed.filter((track) => !catalogIds.has(track.id))];
+          sync(); return;
+        }
       } catch { localStorage.removeItem('needle-queue-v1'); }
     }
     seedTracks.forEach((track) => queueRef.current.addLast(track));
+    catalogRef.current = [...seedTracks];
     sync();
   }, [sync]);
 
   useEffect(() => {
     if (tracks.length) localStorage.setItem('needle-queue-v1', JSON.stringify(tracks));
     else localStorage.removeItem('needle-queue-v1');
+    if (catalogRef.current.length) localStorage.setItem('needle-catalog-v1', JSON.stringify(catalogRef.current));
+    else localStorage.removeItem('needle-catalog-v1');
   }, [tracks]);
+
+  useEffect(() => {
+    historyRef.current = history;
+    if (history.length) localStorage.setItem('needle-history-v1', JSON.stringify(history));
+    else localStorage.removeItem('needle-history-v1');
+  }, [history]);
 
   useEffect(() => {
     fetch(`${apiBase}/api/spotify/status`).then((response) => response.json())
@@ -117,10 +157,20 @@ function App() {
         const state = payload as SpotifyPlaybackState;
         if (!state || typeof state.paused !== 'boolean') return;
         setPosition(state.position / 1000); setDuration(state.duration / 1000); setPlaying(!state.paused);
+        const activeTrack = queueRef.current.current?.value;
+        if (state.paused && state.duration > 0 && state.position >= state.duration - 900 && activeTrack?.spotifyUri && state.track_window?.current_track?.uri === activeTrack.spotifyUri && spotifyEndedTrackRef.current !== activeTrack.id) {
+          spotifyEndedTrackRef.current = activeTrack.id;
+          spotifyEndedHandlerRef.current();
+        } else if (!state.paused) spotifyEndedTrackRef.current = null;
         const uri = state.track_window?.current_track?.uri;
         if (uri) {
-          const match = queueRef.current.toArray().find((track) => track.spotifyUri === uri);
-          if (match && queueRef.current.current?.value.id !== match.id) { queueRef.current.setCurrentById(match.id); sync(); }
+          const list = queueRef.current;
+          const match = list.toArray().find((track) => track.spotifyUri === uri);
+          if (match && list.current?.value.id !== match.id) {
+            const previous = list.current?.value;
+            if (previous) { recordHistory(previous, 'finished'); list.removeById(previous.id); }
+            list.setCurrentById(match.id); sync();
+          }
         }
       });
       setSpotifyPlayer(player);
@@ -189,35 +239,92 @@ function App() {
         if (!active || !state) return;
         setPosition(state.position / 1000);
         setDuration(state.duration / 1000);
+        if (state.paused && state.duration > 0 && state.position >= state.duration - 900 && state.track_window?.current_track?.uri === current?.spotifyUri && current?.spotifyUri && spotifyEndedTrackRef.current !== current.id) {
+          spotifyEndedTrackRef.current = current.id;
+          spotifyEndedHandlerRef.current();
+        } else if (!state.paused) spotifyEndedTrackRef.current = null;
       } catch { /* Playback state can briefly be unavailable during track changes. */ }
     };
     void refreshPosition();
     const timer = window.setInterval(() => { void refreshPosition(); }, 500);
     return () => { active = false; window.clearInterval(timer); };
-  }, [provider, spotifyPlayer, playing, current?.id]);
+  }, [provider, spotifyPlayer, playing, current?.id, current?.spotifyUri]);
 
   const move = useCallback((direction: 'next' | 'previous', automatic = false) => {
     const list = queueRef.current;
-    if (!list.size) return;
-    if (shuffle && direction === 'next' && list.size > 1) {
-      let next = list.current;
-      while (next === list.current) next = list.nodeAt(Math.floor(Math.random() * list.size));
-      list.current = next;
+    const oldCurrent = list.current?.value;
+    if (!oldCurrent) return;
+
+    if (direction === 'previous') {
+      const previousId = list.current?.prev?.value.id;
+      const historyTrack = historyRef.current.find((entry) => entry.track.id !== oldCurrent.id)?.track;
+      recordHistory(oldCurrent, 'skipped');
+      list.removeById(oldCurrent.id);
+      const target = historyTrack ?? (previousId ? list.toArray().find((track) => track.id === previousId) : undefined) ?? catalogRef.current[catalogRef.current.length - 1];
+      if (target) {
+        if (!list.setCurrentById(target.id)) list.addFirst(target);
+        list.setCurrentById(target.id);
+        shuffleBagRef.current = shuffleBagRef.current.filter((id) => id !== target.id);
+      }
     } else {
-      const node = direction === 'next' ? list.moveNext(loop || automatic) : list.movePrevious(loop);
-      if (!node && direction === 'next') { setPlaying(false); setPosition(0); sync(); return; }
+      recordHistory(oldCurrent, automatic ? 'finished' : 'skipped');
+      list.removeById(oldCurrent.id);
+      shuffleBagRef.current = shuffleBagRef.current.filter((id) => id !== oldCurrent.id);
+      if (shuffle) {
+        const available = new Set(list.toArray().map((track) => track.id));
+        shuffleBagRef.current = shuffleBagRef.current.filter((id) => available.has(id));
+        if (!shuffleBagRef.current.length) {
+          list.clear();
+          catalogRef.current.forEach((track) => list.addLast(track));
+          shuffleBagRef.current = shuffledTrackIds(catalogRef.current, oldCurrent.id);
+        }
+        const nextId = shuffleBagRef.current.pop();
+        if (nextId) list.setCurrentById(nextId);
+        else if (catalogRef.current.length) list.setCurrentById(oldCurrent.id);
+      } else if (!list.current && catalogRef.current.length) {
+        catalogRef.current.forEach((track) => list.addLast(track));
+        list.current = list.head;
+      }
     }
+    if (!list.current) { setPlaying(false); setPosition(0); setDuration(0); sync(); return; }
+    const nextTrack = list.current.value;
     sync(); setPosition(0); setPlaying(true);
-  }, [loop, shuffle, sync]);
+    if (nextTrack.id === oldCurrent.id) {
+      if (provider === 'preview' && audioRef.current) { audioRef.current.currentTime = 0; void audioRef.current.play().catch(() => setPlaying(false)); }
+      else if (provider === 'spotify' && spotifyPlayer) void spotifyPlayer.seek(0).then(() => spotifyPlayer.resume()).catch(() => undefined);
+    }
+  }, [provider, recordHistory, shuffle, spotifyPlayer, sync]);
+
+  spotifyEndedHandlerRef.current = () => {
+    if (loop && provider === 'spotify' && spotifyPlayer) {
+      spotifyEndedTrackRef.current = null;
+      setPosition(0); void spotifyPlayer.seek(0).then(() => spotifyPlayer.resume()).catch(() => undefined);
+    } else move('next', true);
+  };
 
   const playTrack = useCallback((id: string) => {
-    if (queueRef.current.setCurrentById(id)) { sync(); setPosition(0); setPlaying(true); }
-  }, [sync]);
+    const list = queueRef.current;
+    const selected = list.toArray().find((track) => track.id === id);
+    if (!selected) return;
+    const previous = list.current?.value;
+    if (previous && previous.id !== id) {
+      recordHistory(previous, 'skipped');
+      list.removeById(previous.id);
+      shuffleBagRef.current = shuffleBagRef.current.filter((trackId) => trackId !== previous.id);
+    }
+    if (list.setCurrentById(id)) {
+      shuffleBagRef.current = shuffleBagRef.current.filter((trackId) => trackId !== id);
+      sync(); setPosition(0); setPlaying(true);
+    }
+  }, [recordHistory, sync]);
 
   const removeTrack = useCallback((id: string) => {
     const wasCurrent = queueRef.current.current?.value.id === id;
     const nextTrack = queueRef.current.nodeAt(queueRef.current.indexOfId(id) + 1)?.value;
-    queueRef.current.removeById(id); sync();
+    queueRef.current.removeById(id);
+    catalogRef.current = catalogRef.current.filter((track) => track.id !== id);
+    shuffleBagRef.current = shuffleBagRef.current.filter((trackId) => trackId !== id);
+    sync();
     if (wasCurrent) { setPosition(0); setPlaying(false); if (nextTrack) window.setTimeout(() => setPlaying(true), 0); }
     notify('Pista eliminada de la cola.');
   }, [notify, sync]);
@@ -228,8 +335,11 @@ function App() {
     if (where === 'start') list.addFirst(track);
     else if (where === 'end') list.addLast(track);
     else list.insertAt(track, where);
+    const activeIds = new Set(list.toArray().map((item) => item.id));
+    catalogRef.current = [...list.toArray(), ...catalogRef.current.filter((item) => !activeIds.has(item.id))];
+    if (shuffle && !shuffleBagRef.current.includes(track.id)) shuffleBagRef.current.splice(Math.floor(Math.random() * (shuffleBagRef.current.length + 1)), 0, track.id);
     sync(); notify(`“${track.title}” añadida a la cola.`);
-  }, [notify, sync]);
+  }, [notify, shuffle, sync]);
 
   const moveToIndex = useCallback((id: string, target: number) => {
     const list = queueRef.current;
@@ -237,11 +347,30 @@ function App() {
     if (source < 0 || target < 0 || target >= list.size || source === target) return;
     const item = list.removeAt(source)!;
     list.insertAt(item, target);
+    const activeIds = new Set(list.toArray().map((track) => track.id));
+    catalogRef.current = [...list.toArray(), ...catalogRef.current.filter((track) => !activeIds.has(track.id))];
     sync();
   }, [sync]);
 
   const clearQueue = () => {
-    queueRef.current.clear(); setTracks([]); setCurrent(null); setPlaying(false); setPosition(0); notify('Cola vaciada.');
+    queueRef.current.clear(); catalogRef.current = []; shuffleBagRef.current = []; setTracks([]); setCurrent(null); setPlaying(false); setPosition(0); notify('Cola vaciada.');
+  };
+
+  const clearHistory = () => { historyRef.current = []; setHistory([]); };
+
+  const toggleShuffle = () => {
+    const enabling = !shuffle;
+    shuffleBagRef.current = enabling ? shuffledTrackIds(queueRef.current.toArray(), queueRef.current.current?.value.id) : [];
+    setShuffle(enabling);
+  };
+
+  const replayHistoryTrack = (track: Track) => {
+    const list = queueRef.current;
+    if (!catalogRef.current.some((item) => item.id === track.id)) catalogRef.current.push(track);
+    if (list.indexOfId(track.id) < 0) list.addFirst(track);
+    list.setCurrentById(track.id);
+    shuffleBagRef.current = shuffleBagRef.current.filter((id) => id !== track.id);
+    sync(); setPosition(0); setPlaying(true);
   };
 
   const togglePlay = () => {
@@ -335,9 +464,10 @@ function App() {
         <button className="rail-link active"><Disc3 size={18} /><span>Reproductor</span></button>
         <button className="rail-link" onClick={() => setActiveTab('Queue')}><ListMusic size={18} /><span>Tu cola</span><small>{tracks.length}</small></button>
         <button className="rail-link" onClick={() => setModalOpen(true)}><Plus size={18} /><span>Añadir música</span></button>
+        <button className="rail-link" onClick={() => document.getElementById('history')?.scrollIntoView({ behavior: 'smooth' })}><Clock3 size={18} /><span>Historial</span><small>{history.length}</small></button>
         <div className="rail-divider" />
         <div className="rail-caption">MODO</div>
-        <button className={`rail-link ${shuffle ? 'toggled' : ''}`} onClick={() => setShuffle((v) => !v)}><Shuffle size={18} /><span>Aleatorio</span></button>
+        <button className={`rail-link ${shuffle ? 'toggled' : ''}`} onClick={toggleShuffle}><Shuffle size={18} /><span>Aleatorio</span></button>
         <button className={`rail-link ${loop ? 'toggled' : ''}`} onClick={() => setLoop((v) => !v)}><Repeat2 size={18} /><span>Repetir pista</span></button>
         <div className="rail-bottom"><div className="rail-status"><span className="status-dot" />{token ? 'Spotify conectado' : 'Modo vista previa'}</div><div className="rail-version">LISTA DOBLE · TYPESCRIPT</div></div>
       </aside>
@@ -355,7 +485,7 @@ function App() {
                 <div className="now-meta"><div className="eyebrow muted">{current ? 'SELECCIÓN ACTUAL' : 'LISTA VACÍA'}</div><h2>{current?.title ?? 'Elige una canción'}</h2><p>{current?.artist ?? 'Añade música para comenzar'}</p><div className="track-tags"><span><span className="tag-dot" /> {current?.album ?? '—'}</span><span>{current ? fmt(current.duration) : '00:00'}</span></div></div>
               </div>
               <div className="player-progress"><span>{fmt(position)}</span><button className="progress-track" aria-label="Buscar posición" onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); const next = ((event.clientX - rect.left) / rect.width) * (duration || 0); setPosition(next); if (provider === 'preview' && audioRef.current) audioRef.current.currentTime = next; else if (provider === 'spotify') void spotifyPlayer?.seek(next * 1000); }}><span style={{ width: `${visualPosition}%` }} /><i style={{ left: `${visualPosition}%` }} /></button><span>{fmt(duration || current?.duration || 0)}</span></div>
-              <div className="player-controls"><button className={`control-sub ${shuffle ? 'enabled' : ''}`} onClick={() => setShuffle((v) => !v)} aria-label="Aleatorio"><Shuffle size={17} /></button><div className="transport"><button className="skip-button" onClick={() => { if (position > 3 && audioRef.current && provider === 'preview') { audioRef.current.currentTime = 0; setPosition(0); } else move('previous'); }} aria-label="Anterior"><SkipBack size={20} fill="currentColor" /></button><button className="play-button" onClick={togglePlay} aria-label={playing ? 'Pausar' : 'Reproducir'}>{playing ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}</button><button className="skip-button" onClick={() => move('next')} aria-label="Siguiente"><SkipForward size={20} fill="currentColor" /></button></div><button className={`control-sub ${loop ? 'enabled' : ''}`} onClick={() => setLoop((v) => !v)} aria-label="Repetir"><Repeat2 size={17} /></button></div>
+              <div className="player-controls"><button className={`control-sub ${shuffle ? 'enabled' : ''}`} onClick={toggleShuffle} aria-label="Aleatorio"><Shuffle size={17} /></button><div className="transport"><button className="skip-button" onClick={() => { if (position > 3 && audioRef.current && provider === 'preview') { audioRef.current.currentTime = 0; setPosition(0); } else move('previous'); }} aria-label="Anterior"><SkipBack size={20} fill="currentColor" /></button><button className="play-button" onClick={togglePlay} aria-label={playing ? 'Pausar' : 'Reproducir'}>{playing ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}</button><button className="skip-button" onClick={() => move('next')} aria-label="Siguiente"><SkipForward size={20} fill="currentColor" /></button></div><button className={`control-sub ${loop ? 'enabled' : ''}`} onClick={() => setLoop((v) => !v)} aria-label="Repetir"><Repeat2 size={17} /></button></div>
               <div className="now-card-footer"><span><span className="quality-dot" /> {token ? 'SPOTIFY CONNECT' : 'LOCAL PREVIEW'}</span><span>{playing ? <><span className="sound-bars"><i /><i /><i /></span> REPRODUCIENDO</> : 'LISTO PARA SONAR'}</span></div>
             </section>
 
@@ -377,6 +507,13 @@ function App() {
               {tracks.length > 0 && <div className="queue-footnote"><span>⠿ &nbsp;Arrastra una pista para reordenar</span><span>LISTA DOBLEMENTE ENLAZADA <b>·</b> HEAD ⇄ TAIL</span></div>}
             </section>
 
+            <section className="history-section" id="history">
+              <div className="section-heading"><div><span className="section-kicker">MEMORIA DE ESCUCHA</span><h2>Historial <span className="count-badge">{history.length.toString().padStart(2, '0')}</span></h2></div><button className="text-button" onClick={clearHistory} disabled={!history.length}>Limpiar historial</button></div>
+              <div className="history-list">
+                {history.map((entry) => <article className="history-row" key={entry.id}><Cover track={entry.track} className="row-cover" /><div className="track-text"><strong>{entry.track.title}</strong><small>{entry.track.artist}</small></div><span className="history-status">{entry.outcome === 'finished' ? 'Escuchada' : 'Saltada'}</span><time>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time><button className="quiet-button" onClick={() => replayHistoryTrack(entry.track)}><Play size={13} /> Volver a poner</button></article>)}
+                {!history.length && <div className="empty-state"><Clock3 size={22} /><span>Las canciones escuchadas o saltadas aparecerán aquí.</span></div>}
+              </div>
+            </section>
             <section className="structure-card"><div className="structure-copy"><span className="section-kicker">POR DEBAJO DEL CAPÓ</span><h3>Una lista que se mueve<br />en <em>dos direcciones.</em></h3><p>Cada canción es un nodo con memoria: conoce a quien viene antes y a quien sigue después.</p></div><div className="structure-diagram"><span className="node-label">HEAD</span>{tracks.slice(0, Math.min(4, tracks.length)).map((track, index) => <div key={track.id} className={`diagram-node ${current?.id === track.id ? 'node-active' : ''}`}><span className="node-pointer">{index ? '←' : '∅'}</span><button onClick={() => playTrack(track.id)} title={`Reproducir ${track.title}`}><span>{track.title.slice(0, 2).toUpperCase()}</span></button><span className="node-pointer">→</span></div>)}<span className="node-label">TAIL</span></div><div className="structure-legend"><span><i className="legend-prev" /> prev</span><span><i className="legend-next" /> next</span><span><i className="legend-current" /> cursor actual</span></div></section>
           </section>
 
@@ -390,10 +527,10 @@ function App() {
         <footer className="page-footer"><span>NEEDLE MUSIC PLAYER <span>©</span> 2026</span><span>HECHO PARA ESCUCHAR CON ATENCIÓN <AudioLines size={14} /></span><span>v1.0.0</span></footer>
       </main>
 
-      <footer className="bottom-player"><div className="bottom-track">{current ? <Cover track={current} className="bottom-cover" /> : <div className="bottom-cover empty-cover"><Disc3 size={20} /></div>}<div><strong>{current?.title ?? 'Nada suena todavía'}</strong><small>{current?.artist ?? 'Añade una canción para comenzar'}</small></div><button className={liked ? 'liked' : ''} onClick={() => setLiked((v) => !v)} aria-label="Me gusta"><Heart size={16} fill={liked ? 'currentColor' : 'none'} /></button></div><div className="bottom-center"><div className="bottom-controls"><button className={shuffle ? 'enabled' : ''} onClick={() => setShuffle((v) => !v)} aria-label="Aleatorio"><Shuffle size={15} /></button><button onClick={() => move('previous')} aria-label="Anterior"><SkipBack size={16} fill="currentColor" /></button><button className="mini-play" onClick={togglePlay} aria-label={playing ? 'Pausar' : 'Reproducir'}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button><button onClick={() => move('next')} aria-label="Siguiente"><SkipForward size={16} fill="currentColor" /></button><button className={loop ? 'enabled' : ''} onClick={() => setLoop((v) => !v)} aria-label="Repetir"><Repeat2 size={15} /></button></div><div className="bottom-seek"><span>{fmt(position)}</span><button className="progress-track" onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); const next = ((event.clientX - rect.left) / rect.width) * duration; if (provider === 'preview' && audioRef.current) audioRef.current.currentTime = next; else if (provider === 'spotify') void spotifyPlayer?.seek(next * 1000); setPosition(next); }}><span style={{ width: `${visualPosition}%` }} /></button><span>{fmt(duration || current?.duration || 0)}</span></div></div><div className="bottom-right"><button onClick={() => setModalOpen(true)} title="Añadir a la cola"><ListMusic size={17} /></button><button onClick={() => setMuted((v) => !v)} aria-label="Silenciar"><AudioLines size={17} /></button><input aria-label="Volumen" type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { setVolume(Number(event.target.value)); setMuted(false); }} /><button title="Ajustes" onClick={() => notify('Los ajustes de audio están listos para ampliarse.')}><SlidersHorizontal size={17} /></button></div></footer>
+      <footer className="bottom-player"><div className="bottom-track">{current ? <Cover track={current} className="bottom-cover" /> : <div className="bottom-cover empty-cover"><Disc3 size={20} /></div>}<div><strong>{current?.title ?? 'Nada suena todavía'}</strong><small>{current?.artist ?? 'Añade una canción para comenzar'}</small></div><button className={liked ? 'liked' : ''} onClick={() => setLiked((v) => !v)} aria-label="Me gusta"><Heart size={16} fill={liked ? 'currentColor' : 'none'} /></button></div><div className="bottom-center"><div className="bottom-controls"><button className={shuffle ? 'enabled' : ''} onClick={toggleShuffle} aria-label="Aleatorio"><Shuffle size={15} /></button><button onClick={() => move('previous')} aria-label="Anterior"><SkipBack size={16} fill="currentColor" /></button><button className="mini-play" onClick={togglePlay} aria-label={playing ? 'Pausar' : 'Reproducir'}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button><button onClick={() => move('next')} aria-label="Siguiente"><SkipForward size={16} fill="currentColor" /></button><button className={loop ? 'enabled' : ''} onClick={() => setLoop((v) => !v)} aria-label="Repetir"><Repeat2 size={15} /></button></div><div className="bottom-seek"><span>{fmt(position)}</span><button className="progress-track" onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); const next = ((event.clientX - rect.left) / rect.width) * duration; if (provider === 'preview' && audioRef.current) audioRef.current.currentTime = next; else if (provider === 'spotify') void spotifyPlayer?.seek(next * 1000); setPosition(next); }}><span style={{ width: `${visualPosition}%` }} /></button><span>{fmt(duration || current?.duration || 0)}</span></div></div><div className="bottom-right"><button onClick={() => setModalOpen(true)} title="Añadir a la cola"><ListMusic size={17} /></button><button onClick={() => setMuted((v) => !v)} aria-label="Silenciar"><AudioLines size={17} /></button><input aria-label="Volumen" type="range" min="0" max="1" step="0.01" value={muted ? 0 : volume} onChange={(event) => { setVolume(Number(event.target.value)); setMuted(false); }} /><button title="Ajustes" onClick={() => notify('Los ajustes de audio están listos para ampliarse.')}><SlidersHorizontal size={17} /></button></div></footer>
 
       <input ref={fileRef} className="hidden-input" type="file" accept="audio/*" multiple onChange={(event) => addLocalFiles(event.target.files)} />
-      {modalOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalOpen(false); }}><section className="add-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-head"><div><span className="section-kicker">AMPLÍA TU SELECCIÓN</span><h2 id="modal-title">Añadir música</h2></div><button className="icon-button" onClick={() => setModalOpen(false)} aria-label="Cerrar"><X size={19} /></button></div><p className="modal-copy">Elige una forma de llevar música a tu fila.</p><button className="modal-option" onClick={() => { setModalOpen(false); setActiveTab('Discover'); }}><div className="option-icon"><Sparkles size={18} /></div><span><b>Explorar sugerencias</b><small>Descubre pistas seleccionadas para ti</small></span><ArrowRight size={17} /></button><button className="modal-option" onClick={() => fileRef.current?.click()}><div className="option-icon"><Music2 size={18} /></div><span><b>Subir audio local</b><small>Reproduce archivos de este dispositivo</small></span><ArrowRight size={17} /></button>{token && <><div className="modal-divider"><span>CATÁLOGO DE SPOTIFY</span></div><form className="spotify-search-form" onSubmit={searchSpotify}><input aria-label="Buscar en Spotify" value={spotifySearch} onChange={(event) => setSpotifySearch(event.target.value)} placeholder="Busca una canción o artista..." /><button type="submit" disabled={searchingSpotify}>{searchingSpotify ? <LoaderCircle size={15} className="spinning" /> : <Search size={15} />}</button></form>{spotifyResults.map((result) => <div className="spotify-result" key={result.id}><img src={result.album.images?.[2]?.url ?? result.album.images?.[0]?.url ?? art('photo-1519681393784-d120267933ba', 100)} alt="" /><span><b>{result.name}</b><small>{result.artists.map((artist) => artist.name).join(', ')}{result.preview_url ? ' · preview' : ''}</small></span><button onClick={() => addSpotifyTrack(result)} aria-label={`Añadir ${result.name}`}><Plus size={15} /></button></div>)}<p className="spotify-legal">Las vistas previas dependen de lo que entregue Spotify. Las pistas sin preview aparecen en tu cola, pero requieren integrar Web Playback SDK para reproducirse completas.</p></>}<div className="modal-divider"><span>O CREA UNA PISTA</span></div><form onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const title = String(form.get('title') || ''); if (!title.trim()) return; const track = makeTrack(title, String(form.get('artist') || ''), String(form.get('cover') || '')); const indexValue = String(form.get('position') || 'end'); addTrack(track, indexValue === 'start' || indexValue === 'end' ? indexValue : Math.min(Number(indexValue), queueRef.current.size)); event.currentTarget.reset(); setModalOpen(false); }}><label>TÍTULO<input name="title" required placeholder="¿Cómo se llama la canción?" /></label><label>ARTISTA<input name="artist" placeholder="Nombre del artista" /></label><label>URL DE PORTADA <span>OPCIONAL</span><input name="cover" type="url" placeholder="https://..." /></label><label>POSICIÓN EN LA LISTA<select name="position"><option value="end">Al final de la lista</option><option value="start">Al inicio de la lista</option>{tracks.map((track, index) => <option value={index} key={track.id}>En la posición {index + 1} — antes de {track.title}</option>)}</select></label><button className="modal-submit" type="submit">Añadir a la cola <Plus size={16} /></button></form></section></div>}
+      {modalOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalOpen(false); }}><section className="add-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-head"><div><span className="section-kicker">AMPLÍA TU SELECCIÓN</span><h2 id="modal-title">Añadir música</h2></div><button className="icon-button" onClick={() => setModalOpen(false)} aria-label="Cerrar"><X size={19} /></button></div><p className="modal-copy">Elige una forma de llevar música a tu fila.</p><button className="modal-option" onClick={() => { setModalOpen(false); setActiveTab('Discover'); }}><div className="option-icon"><Sparkles size={18} /></div><span><b>Explorar sugerencias</b><small>Descubre pistas seleccionadas para ti</small></span><ArrowRight size={17} /></button><button className="modal-option" onClick={() => fileRef.current?.click()}><div className="option-icon"><Music2 size={18} /></div><span><b>Subir audio local</b><small>Reproduce archivos de este dispositivo</small></span><ArrowRight size={17} /></button>{token && <><div className="modal-divider"><span>CATÁLOGO DE SPOTIFY</span></div><form className="spotify-search-form" onSubmit={searchSpotify}><input aria-label="Buscar en Spotify" value={spotifySearch} onChange={(event) => setSpotifySearch(event.target.value)} placeholder="Busca una canción o artista..." /><button type="submit" disabled={searchingSpotify}>{searchingSpotify ? <LoaderCircle size={15} className="spinning" /> : <Search size={15} />}</button></form>{spotifyResults.map((result) => <div className="spotify-result" key={result.id}><img src={result.album.images?.[2]?.url ?? result.album.images?.[0]?.url ?? art('photo-1519681393784-d120267933ba', 100)} alt="" /><span><b>{result.name}</b><small>{result.artists.map((artist) => artist.name).join(', ')}{result.preview_url ? ' · preview' : ''}</small></span><button onClick={() => addSpotifyTrack(result)} aria-label={`Añadir ${result.name}`}><Plus size={15} /></button></div>)}<p className="spotify-legal">Las vistas previas dependen de lo que entregue Spotify. Las pistas sin preview aparecen en tu cola, pero requieren integrar Web Playback SDK para reproducirse completas.</p></>}<div className="modal-divider"><span>O CREA UNA PISTA</span></div><form onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const title = String(form.get('title') || ''); if (!title.trim()) return; const track = makeTrack(title, String(form.get('artist') || ''), String(form.get('cover') || '')); const indexValue = String(form.get('position') || 'end'); addTrack(track, indexValue === 'start' || indexValue === 'end' ? indexValue : Math.min(Number(indexValue), queueRef.current.size)); event.currentTarget.reset(); setModalOpen(false); }}><label>TÍTULO<input name="title" required placeholder="¿Cómo se llama la canción?" /></label><label>ARTISTA<input name="artist" placeholder="Nombre del artista" /></label><label>URL DE PORTADA <span>OPCIONAL</span><input name="cover" type="url" placeholder="https://..." /></label><label>POSICIÓN EN LA LISTA<select name="position"><option value="end">Al final de la lista</option><option value="start">Al inicio de la lista</option>{Array.from({ length: tracks.length + 1 }, (_, index) => <option value={index} key={'position-' + index}>{index === tracks.length ? 'Posición ' + (index + 1) + ' — al final' : 'Posición ' + (index + 1) + ' — antes de ' + tracks[index].title}</option>)}</select></label><button className="modal-submit" type="submit">Añadir a la cola <Plus size={16} /></button></form></section></div>}
       {toast && <div className={`toast ${toastError ? 'toast-error' : ''}`}><span>{toastError ? '!' : '✓'}</span>{toast}</div>}
       <div className="keyboard-only" aria-live="polite">{current ? `Reproduciendo ${current.title}` : 'Cola vacía'}</div>
     </div>

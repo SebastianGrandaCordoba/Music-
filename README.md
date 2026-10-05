@@ -6,11 +6,12 @@ Needle es una aplicación web para escuchar y organizar canciones mediante una *
 
 - Agregar canciones al inicio, al final o en una posición elegida.
 - Eliminar canciones y vaciar la cola.
-- Avanzar y retroceder entre pistas; reproducción aleatoria y repetición.
+- Avanzar y retroceder entre pistas; al finalizar una canción sale de la fila activa y queda registrada en el historial.
+- Modo aleatorio sin repetir pistas hasta completar una ronda; en orden normal la fila vuelve a empezar al llegar al final.
+- Historial independiente de canciones escuchadas o saltadas, con opción de volverlas a agregar y reproducir.
 - Reordenar canciones arrastrándolas y ver sus enlaces `prev` y `next`.
 - Buscar dentro de la cola y conservarla al recargar la página.
 - Explorar sugerencias, escuchar previews disponibles y cargar audio local.
-- Reproducir siete demos instrumentales originales incluidos en el proyecto, sin conectar Spotify.
 - Conectar Spotify, buscar canciones del catálogo y reproducir con Web Playback SDK cuando la cuenta y la aplicación tengan acceso habilitado.
 - Interfaz adaptable a escritorio y móvil.
 
@@ -87,14 +88,6 @@ pnpm build
 
 ## Integración de audio
 
-La cola inicial incluye siete demos instrumentales originales servidos desde `client/public/audio`, por lo que se pueden escuchar sin Spotify. Al abrir la página, pulsa **Reproducir**: los navegadores requieren una interacción del usuario antes de iniciar el audio. También se pueden cargar archivos locales.
-
 La conexión con Spotify usa OAuth PKCE y requiere que la aplicación tenga el scope `streaming` habilitado, una cuenta Premium elegible y acceso al Web Playback SDK. La disponibilidad depende de los permisos que Spotify conceda a la aplicación. Cuando no se pueda reproducir desde Spotify, Needle usa un preview disponible o permite cargar un archivo de audio local.
 
 La cola se guarda en el almacenamiento local del navegador. Los archivos de audio seleccionados se reproducen desde el dispositivo y no se cargan al servidor.
-
-### Spotify en modo de desarrollo
-
-Las aplicaciones de Spotify en **Development Mode** tienen acceso restringido. La cuenta propietaria de la aplicación debe tener Premium activo y cada usuario que quiera conectar Spotify debe estar autorizado en **Spotify for Developers → aplicación → Settings → Users Management**. Spotify limita cuántos usuarios se pueden autorizar en este modo; consulta el Dashboard para ver el límite vigente. Además, cada cuenta que use Web Playback SDK para escuchar música completa debe tener Premium.
-
-El profesor puede probar la cola, la lista doblemente enlazada y sus controles sin conectar Spotify. Para escuchar audio durante la demostración, puede cargar un archivo local desde **Añadir música → Subir audio local**. Los archivos permanecen en su dispositivo.
