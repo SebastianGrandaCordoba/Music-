@@ -9,6 +9,7 @@ Needle es una aplicación web para escuchar y organizar canciones mediante una *
 - Avanzar y retroceder entre pistas; al finalizar una canción sale de la fila activa y queda registrada en el historial.
 - Modo aleatorio sin repetir pistas hasta completar una ronda; en orden normal la fila vuelve a empezar al llegar al final.
 - Historial independiente de canciones escuchadas o saltadas, con opción de volverlas a agregar y reproducir.
+- Cada recarga empieza con las canciones demo originales; la búsqueda, la cola, el historial y la sesión de Spotify vuelven a iniciar.
 - Reordenar canciones arrastrándolas y ver sus enlaces `prev` y `next`.
 - Buscar dentro de la cola y conservarla al recargar la página.
 - Explorar sugerencias, escuchar previews disponibles y cargar audio local.
@@ -90,4 +91,12 @@ pnpm build
 
 La conexión con Spotify usa OAuth PKCE y requiere que la aplicación tenga el scope `streaming` habilitado, una cuenta Premium elegible y acceso al Web Playback SDK. La disponibilidad depende de los permisos que Spotify conceda a la aplicación. Cuando no se pueda reproducir desde Spotify, Needle usa un preview disponible o permite cargar un archivo de audio local.
 
-La cola se guarda en el almacenamiento local del navegador. Los archivos de audio seleccionados se reproducen desde el dispositivo y no se cargan al servidor.
+Al recargar, la cola y el historial se reinician, y se requiere volver a conectar Spotify. Las canciones de prueba se cargan nuevamente. Los archivos de audio seleccionados se reproducen desde el dispositivo y no se cargan al servidor.
+
+## Despliegue y callback de Spotify
+
+En producción, el frontend de Vercel usa `client/vercel.json` para reenviar `/api/*` al backend de Render manteniendo el dominio de Vercel en la barra del navegador. Así, la autorización de Spotify regresa por el mismo dominio que la aplicación.
+
+Para este despliegue, registra exactamente `https://music-opal-kappa.vercel.app/api/spotify/callback` como Redirect URI en el Developer Dashboard de Spotify y configura el mismo valor en `SPOTIFY_REDIRECT_URI` en Render. `CLIENT_ORIGIN` en Render debe ser `https://music-opal-kappa.vercel.app`. El dominio del backend indicado en `client/vercel.json` debe coincidir con el servicio Render actual. En Vercel, usa `client` como Root Directory para que cargue ese archivo de proxy. En local, la app sigue usando `http://localhost:4000`.
+
+Chrome controla la advertencia de sitio peligroso mediante Safe Browsing; el código de la app no puede quitarla ni debe ocultarla. El proxy evita que la navegación OAuth lleve al usuario directamente al hostname de Render. Si Chrome también marca el dominio Vercel, el propietario del sitio debe revisar su estado con Google Safe Browsing y solicitar una revisión si considera que es un falso positivo.
